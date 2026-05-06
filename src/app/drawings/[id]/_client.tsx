@@ -467,7 +467,9 @@ export function DrawingPageClient({
 					excalidrawAPI={(api: unknown) => {
 						excalidrawAPIRef.current = api as ExcalidrawAPI;
 					}}
-				/>
+				>
+					<CustomMainMenu />
+				</Excalidraw>
 			</div>
 
 			{isOwner && (
