@@ -45,10 +45,20 @@ export function DrawingPageClient({
 	const canEdit = role === "OWNER" || role === "EDITOR";
 	const isOwner = role === "OWNER";
 
-	const initialData =
-		drawing.content && typeof drawing.content === "object"
-			? (drawing.content as Record<string, unknown>)
-			: {};
+	const initialData = (() => {
+		if (!drawing.content || typeof drawing.content !== "object") return {};
+		const raw = drawing.content as Record<string, unknown>;
+		const appState =
+			raw.appState && typeof raw.appState === "object"
+				? { ...(raw.appState as Record<string, unknown>) }
+				: undefined;
+		if (appState) {
+			// Excalidraw espera collaborators como Map; após JSON.parse vira objeto e quebra (forEach is not a function).
+			// Removemos para o Excalidraw recriar internamente.
+			delete appState.collaborators;
+		}
+		return { ...raw, ...(appState ? { appState } : {}) };
+	})();
 
 	const onChange = useCallback(
 		(elements: readonly unknown[], appState: unknown, files: unknown) => {
@@ -56,9 +66,18 @@ export function DrawingPageClient({
 			if (saveTimer.current) clearTimeout(saveTimer.current);
 			saveTimer.current = setTimeout(async () => {
 				try {
+					// Não persistir collaborators (Map não serializa em JSON e quebra no reload)
+					const cleanAppState =
+						appState && typeof appState === "object"
+							? (() => {
+									const { collaborators: _omit, ...rest } = appState as Record<string, unknown>;
+									void _omit;
+									return rest;
+								})()
+							: appState;
 					const res = await apiFetch(`/drawings/${drawing.id}`, {
 						method: "PUT",
-						body: JSON.stringify({ elements, appState, files }),
+						body: JSON.stringify({ elements, appState: cleanAppState, files }),
 					});
 					if (!res.ok) {
 						const data = await res.json().catch(() => ({}));
