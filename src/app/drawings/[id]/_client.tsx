@@ -31,13 +31,68 @@ const SAVE_DEBOUNCE_MS = 800;
 // Throttle de broadcast realtime: alta o suficiente para parecer instantâneo,
 // baixa o suficiente para não saturar a rede em rabiscos rápidos.
 const BROADCAST_THROTTLE_MS = 80;
+// Cursor/laser muda a cada mousemove — throttle mais alto para não inundar.
+const POINTER_THROTTLE_MS = 50;
+// Após esse tempo sem updates de um peer, removemos o cursor dele.
+const PEER_TTL_MS = 8000;
 
 // Tipo mínimo do excalidrawAPI que usamos. Evita import direto do tipo (que
 // só existe em runtime após o dynamic import).
 type ExcalidrawAPI = {
-	updateScene: (scene: { elements?: readonly unknown[] }) => void;
+	updateScene: (scene: {
+		elements?: readonly unknown[];
+		collaborators?: Map<string, unknown>;
+	}) => void;
 	getSceneElementsIncludingDeleted: () => readonly unknown[];
 };
+
+type PointerPayload = {
+	from: { socketId: string; userId: string };
+	pointer?: { x: number; y: number; tool?: "pointer" | "laser" };
+	button?: "down" | "up";
+	selectedElementIds?: Record<string, true>;
+	username?: string;
+	color?: { background: string; stroke: string };
+};
+
+// Paleta determinística por userId — mesmo usuário, mesma cor entre sessões.
+const COLLAB_COLORS = [
+	{ background: "#FFB1C1", stroke: "#C4395B" },
+	{ background: "#A0E7E5", stroke: "#1E847F" },
+	{ background: "#FBE7C6", stroke: "#B07D2A" },
+	{ background: "#B4F8C8", stroke: "#1F7A3D" },
+	{ background: "#C6B4F8", stroke: "#5238A3" },
+	{ background: "#FFD6A5", stroke: "#B0501C" },
+	{ background: "#9BF6FF", stroke: "#0E7C8A" },
+	{ background: "#FDFFB6", stroke: "#7A6A12" },
+];
+function colorFor(userId: string): { background: string; stroke: string } {
+	let h = 0;
+	for (let i = 0; i < userId.length; i++) h = (h * 31 + userId.charCodeAt(i)) | 0;
+	return COLLAB_COLORS[Math.abs(h) % COLLAB_COLORS.length];
+}
+
+const SITE_THEME_KEY = "site-theme";
+
+/**
+ * Aplica o tema (light/dark) ao site inteiro togglando a classe `dark` no
+ * <html>. globals.css usa `@custom-variant dark (&:is(.dark *))`, então essa
+ * classe propaga para todas as utilities `dark:*`.
+ *
+ * Mantém persistência em localStorage para outras páginas (dashboard, login)
+ * carregarem com o mesmo tema.
+ */
+function applySiteTheme(theme: "light" | "dark"): void {
+	if (typeof document === "undefined") return;
+	const root = document.documentElement;
+	if (theme === "dark") root.classList.add("dark");
+	else root.classList.remove("dark");
+	try {
+		localStorage.setItem(SITE_THEME_KEY, theme);
+	} catch {
+		// localStorage indisponível (modo privado) — ignora.
+	}
+}
 
 export function DrawingPageClient({
 	user,
@@ -66,6 +121,16 @@ export function DrawingPageClient({
 	const lastBroadcastAtRef = useRef(0);
 	const pendingBroadcastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const lastElementsRef = useRef<readonly unknown[] | null>(null);
+	// Estado dos colaboradores remotos (cursores/laser). Map mutável que é
+	// reaplicado no Excalidraw via updateScene a cada update.
+	const collaboratorsRef = useRef<Map<string, Record<string, unknown>>>(new Map());
+	const peerLastSeenRef = useRef<Map<string, number>>(new Map());
+	const lastPointerEmitAtRef = useRef(0);
+	const pointerEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const lastPointerPayloadRef = useRef<Record<string, unknown> | null>(null);
+
+	const myDisplayName = user.name?.trim() || user.email.split("@")[0] || "Anônimo";
+	const myColor = colorFor(user.id);
 
 	const initialData = (() => {
 		if (!drawing.content || typeof drawing.content !== "object") return {};
@@ -86,6 +151,14 @@ export function DrawingPageClient({
 		(elements: readonly unknown[], appState: unknown, files: unknown) => {
 			// Sempre guarda o último snapshot para reconciliação ao receber updates remotos.
 			lastElementsRef.current = elements;
+
+			// Sincroniza o tema do site com o tema do Excalidraw.
+			if (appState && typeof appState === "object") {
+				const theme = (appState as { theme?: string }).theme;
+				if (theme === "dark" || theme === "light") {
+					applySiteTheme(theme);
+				}
+			}
 
 			// Se o evento foi disparado por um update remoto, NÃO retransmite nem persiste.
 			if (skipNextEmitRef.current) {
@@ -147,7 +220,65 @@ export function DrawingPageClient({
 		[canEdit, drawing.id],
 	);
 
-	// Conexão Socket.IO + listeners de scene-update.
+	// Reaplica o Map de colaboradores no Excalidraw. Excalidraw espera um
+	// Map<socketId, {username, color, pointer, button, selectedElementIds}>.
+	const flushCollaborators = useCallback(() => {
+		const api = excalidrawAPIRef.current;
+		if (!api) return;
+		// Clona o Map para forçar comparação por referência interna do Excalidraw.
+		const next = new Map(collaboratorsRef.current);
+		api.updateScene({ collaborators: next });
+	}, []);
+
+	// Handler de pointer update local (movimento de mouse e laser do Excalidraw).
+	const onPointerUpdate = useCallback(
+		(payload: {
+			pointer: { x: number; y: number; tool: "pointer" | "laser" };
+			button: "down" | "up";
+			pointersMap: Map<unknown, unknown>;
+		}) => {
+			const socket = socketRef.current;
+			if (!socket || !socket.connected) return;
+			// Evita inundar quando o Excalidraw dispara múltiplos pointers (touch).
+			if (payload.pointersMap?.size && payload.pointersMap.size > 1) return;
+
+			const data: Record<string, unknown> = {
+				pointer: {
+					x: payload.pointer.x,
+					y: payload.pointer.y,
+					tool: payload.pointer.tool,
+				},
+				button: payload.button,
+				username: myDisplayName,
+				color: myColor,
+			};
+			lastPointerPayloadRef.current = data;
+
+			const now = Date.now();
+			const since = now - lastPointerEmitAtRef.current;
+			const flush = () => {
+				lastPointerEmitAtRef.current = Date.now();
+				if (lastPointerPayloadRef.current) {
+					socket.emit("pointer-update", lastPointerPayloadRef.current);
+				}
+			};
+			if (since >= POINTER_THROTTLE_MS) {
+				if (pointerEmitTimerRef.current) {
+					clearTimeout(pointerEmitTimerRef.current);
+					pointerEmitTimerRef.current = null;
+				}
+				flush();
+			} else if (!pointerEmitTimerRef.current) {
+				pointerEmitTimerRef.current = setTimeout(() => {
+					pointerEmitTimerRef.current = null;
+					flush();
+				}, POINTER_THROTTLE_MS - since);
+			}
+		},
+		[myDisplayName, myColor],
+	);
+
+	// Conexão Socket.IO + listeners de scene-update / pointer-update.
 	useEffect(() => {
 		const socket = createRealtimeSocket();
 		socketRef.current = socket;
@@ -170,7 +301,45 @@ export function DrawingPageClient({
 			api.updateScene({ elements: payload.elements });
 		});
 
+		socket.on("pointer-update", (payload: PointerPayload) => {
+			if (!payload?.from?.socketId) return;
+			const id = payload.from.socketId;
+			const fallbackColor = colorFor(payload.from.userId ?? id);
+			collaboratorsRef.current.set(id, {
+				id,
+				username: payload.username ?? "Convidado",
+				color: payload.color ?? fallbackColor,
+				pointer: payload.pointer,
+				button: payload.button,
+				selectedElementIds: payload.selectedElementIds ?? {},
+			});
+			peerLastSeenRef.current.set(id, Date.now());
+			flushCollaborators();
+		});
+
+		socket.on("peer-left", (payload: { socketId: string }) => {
+			if (!payload?.socketId) return;
+			collaboratorsRef.current.delete(payload.socketId);
+			peerLastSeenRef.current.delete(payload.socketId);
+			flushCollaborators();
+		});
+
+		// GC de peers inativos (caso o `peer-left` se perca).
+		const gc = setInterval(() => {
+			const now = Date.now();
+			let changed = false;
+			for (const [id, ts] of peerLastSeenRef.current) {
+				if (now - ts > PEER_TTL_MS) {
+					collaboratorsRef.current.delete(id);
+					peerLastSeenRef.current.delete(id);
+					changed = true;
+				}
+			}
+			if (changed) flushCollaborators();
+		}, 2000);
+
 		return () => {
+			clearInterval(gc);
 			socket.removeAllListeners();
 			socket.disconnect();
 			socketRef.current = null;
@@ -178,13 +347,38 @@ export function DrawingPageClient({
 				clearTimeout(pendingBroadcastTimerRef.current);
 				pendingBroadcastTimerRef.current = null;
 			}
+			if (pointerEmitTimerRef.current) {
+				clearTimeout(pointerEmitTimerRef.current);
+				pointerEmitTimerRef.current = null;
+			}
+			collaboratorsRef.current.clear();
+			peerLastSeenRef.current.clear();
 		};
-	}, [drawing.id]);
+	}, [drawing.id, flushCollaborators]);
 
 	useEffect(() => {
 		return () => {
 			if (saveTimer.current) clearTimeout(saveTimer.current);
 		};
+	}, []);
+
+	// Aplica o tema inicial (do desenho ou do localStorage) antes de renderizar.
+	useEffect(() => {
+		const fromDrawing = (() => {
+			const a = (initialData as { appState?: { theme?: string } }).appState;
+			return a?.theme === "dark" || a?.theme === "light" ? a.theme : null;
+		})();
+		const fromStorage = (() => {
+			try {
+				const v = localStorage.getItem(SITE_THEME_KEY);
+				return v === "dark" || v === "light" ? v : null;
+			} catch {
+				return null;
+			}
+		})();
+		const theme = fromDrawing ?? fromStorage;
+		if (theme) applySiteTheme(theme);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
 	async function renameDrawing() {
@@ -264,6 +458,7 @@ export function DrawingPageClient({
 					initialData={initialData as never}
 					viewModeEnabled={!canEdit}
 					onChange={onChange}
+					onPointerUpdate={onPointerUpdate as never}
 					excalidrawAPI={(api: unknown) => {
 						excalidrawAPIRef.current = api as ExcalidrawAPI;
 					}}

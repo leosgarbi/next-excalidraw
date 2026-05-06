@@ -23,11 +23,17 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Script inline executado antes da hidratação para evitar "flash" do tema
+  // claro quando o usuário já escolheu dark no Excalidraw.
+  const themeBootstrap = `(() => { try { const t = localStorage.getItem("site-theme"); if (t === "dark") document.documentElement.classList.add("dark"); } catch (_) {} })();`;
   return (
     <html
       lang="pt-BR"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
+      </head>
       <body className="min-h-full flex flex-col bg-background text-foreground">
         {children}
         <Toaster />
