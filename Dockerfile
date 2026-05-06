@@ -4,8 +4,12 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 RUN apk add --no-cache libc6-compat
-COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# `package-lock.json*` (com glob) torna o lock opcional. Se estiver fora de
+# sincronia, cai pra `npm install` que regenera dentro do container.
+COPY package.json package-lock.json* ./
+RUN npm ci --no-audit --no-fund \
+ || (echo ">>> npm ci falhou (lock dessincronizado). Caindo pra npm install." \
+     && npm install --no-audit --no-fund)
 
 # ---------- builder ----------
 FROM node:20-alpine AS builder
