@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api-client";
+import { createRealtimeSocket, type RealtimeSocket } from "@/lib/realtime";
 import "@excalidraw/excalidraw/index.css";
 import { ArrowLeft, Eye, Pencil, Share2 } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -27,6 +28,16 @@ type Drawing = {
 };
 
 const SAVE_DEBOUNCE_MS = 800;
+// Throttle de broadcast realtime: alta o suficiente para parecer instantâneo,
+// baixa o suficiente para não saturar a rede em rabiscos rápidos.
+const BROADCAST_THROTTLE_MS = 80;
+
+// Tipo mínimo do excalidrawAPI que usamos. Evita import direto do tipo (que
+// só existe em runtime após o dynamic import).
+type ExcalidrawAPI = {
+	updateScene: (scene: { elements?: readonly unknown[] }) => void;
+	getSceneElementsIncludingDeleted: () => readonly unknown[];
+};
 
 export function DrawingPageClient({
 	user,
@@ -45,6 +56,17 @@ export function DrawingPageClient({
 	const canEdit = role === "OWNER" || role === "EDITOR";
 	const isOwner = role === "OWNER";
 
+	// Refs do realtime.
+	const excalidrawAPIRef = useRef<ExcalidrawAPI | null>(null);
+	const socketRef = useRef<RealtimeSocket | null>(null);
+	// Quando aplicamos um update vindo da rede, suprimimos o próximo emit
+	// para evitar loop (cada cliente reemitindo o que recebeu).
+	const skipNextEmitRef = useRef(false);
+	// Última vez que disparamos um broadcast (throttle).
+	const lastBroadcastAtRef = useRef(0);
+	const pendingBroadcastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const lastElementsRef = useRef<readonly unknown[] | null>(null);
+
 	const initialData = (() => {
 		if (!drawing.content || typeof drawing.content !== "object") return {};
 		const raw = drawing.content as Record<string, unknown>;
@@ -62,7 +84,41 @@ export function DrawingPageClient({
 
 	const onChange = useCallback(
 		(elements: readonly unknown[], appState: unknown, files: unknown) => {
+			// Sempre guarda o último snapshot para reconciliação ao receber updates remotos.
+			lastElementsRef.current = elements;
+
+			// Se o evento foi disparado por um update remoto, NÃO retransmite nem persiste.
+			if (skipNextEmitRef.current) {
+				skipNextEmitRef.current = false;
+				return;
+			}
+
 			if (!canEdit) return;
+
+			// 1) Broadcast em tempo real (throttled).
+			const socket = socketRef.current;
+			if (socket && socket.connected) {
+				const now = Date.now();
+				const since = now - lastBroadcastAtRef.current;
+				const flush = () => {
+					lastBroadcastAtRef.current = Date.now();
+					socket.emit("scene-update", { elements });
+				};
+				if (since >= BROADCAST_THROTTLE_MS) {
+					if (pendingBroadcastTimerRef.current) {
+						clearTimeout(pendingBroadcastTimerRef.current);
+						pendingBroadcastTimerRef.current = null;
+					}
+					flush();
+				} else if (!pendingBroadcastTimerRef.current) {
+					pendingBroadcastTimerRef.current = setTimeout(() => {
+						pendingBroadcastTimerRef.current = null;
+						flush();
+					}, BROADCAST_THROTTLE_MS - since);
+				}
+			}
+
+			// 2) Persistência debounced no backend (autosave).
 			if (saveTimer.current) clearTimeout(saveTimer.current);
 			saveTimer.current = setTimeout(async () => {
 				try {
@@ -90,6 +146,40 @@ export function DrawingPageClient({
 		},
 		[canEdit, drawing.id],
 	);
+
+	// Conexão Socket.IO + listeners de scene-update.
+	useEffect(() => {
+		const socket = createRealtimeSocket();
+		socketRef.current = socket;
+
+		const join = () => {
+			socket.emit("join", { drawingId: drawing.id }, (res: unknown) => {
+				const ok = (res as { ok?: boolean })?.ok;
+				if (!ok) {
+					console.warn("[realtime] join recusado:", res);
+				}
+			});
+		};
+
+		socket.on("connect", join);
+		socket.on("scene-update", (payload: { elements: readonly unknown[] }) => {
+			const api = excalidrawAPIRef.current;
+			if (!api || !payload?.elements) return;
+			// Marca para o próximo onChange disparado pelo updateScene não retransmitir.
+			skipNextEmitRef.current = true;
+			api.updateScene({ elements: payload.elements });
+		});
+
+		return () => {
+			socket.removeAllListeners();
+			socket.disconnect();
+			socketRef.current = null;
+			if (pendingBroadcastTimerRef.current) {
+				clearTimeout(pendingBroadcastTimerRef.current);
+				pendingBroadcastTimerRef.current = null;
+			}
+		};
+	}, [drawing.id]);
 
 	useEffect(() => {
 		return () => {
@@ -174,6 +264,9 @@ export function DrawingPageClient({
 					initialData={initialData as never}
 					viewModeEnabled={!canEdit}
 					onChange={onChange}
+					excalidrawAPI={(api: unknown) => {
+						excalidrawAPIRef.current = api as ExcalidrawAPI;
+					}}
 				/>
 			</div>
 
