@@ -1,0 +1,4 @@
+# O Postgres agora vive no compose do backend.
+# Veja ../excalidraw-storage-backend/docker-compose.yml.
+
+services: {}
