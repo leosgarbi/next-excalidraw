@@ -13,15 +13,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ShareDialog } from "./_share-dialog";
 
-const Excalidraw = dynamic(() => import("@excalidraw/excalidraw").then((m) => m.Excalidraw), {
+// IMPORTANTE: um único dynamic() para Excalidraw + MainMenu — caso contrário
+// o bundler cria chunks separados que re-avaliam o pacote, e o loader interno
+// de locale do Excalidraw (com estado de módulo) entra em conflito entre as
+// duas instâncias e o spinner "Loading scene..." fica preso (especialmente
+// ao abrir a mesma rota numa segunda aba). Ver `_excalidraw.tsx`.
+const Excalidraw = dynamic(() => import("./_excalidraw").then((m) => m.Excalidraw), {
 	ssr: false,
 	loading: () => <div className="p-8 text-sm text-muted-foreground">Carregando…</div>,
 });
 
-// MainMenu customizado (sem X/GitHub, Discord apontando para nosso server).
-// Em arquivo separado para que o dynamic import com ssr:false funcione com
-// os subcomponentes de namespace (MainMenu.DefaultItems.*).
-const CustomMainMenu = dynamic(() => import("./_main-menu"), { ssr: false });
+const CustomMainMenu = dynamic(() => import("./_excalidraw").then((m) => m.CustomMainMenu), {
+	ssr: false,
+});
 
 type Role = "OWNER" | "EDITOR" | "VIEWER";
 
@@ -307,7 +311,10 @@ export function DrawingPageClient({
 			// próprio Excalidraw — ele resolve conflitos por (version, versionNonce)
 			// elemento a elemento, mantendo o que cada peer está editando agora.
 			try {
-				const { reconcileElements } = await import("@excalidraw/excalidraw");
+				// Importa do mesmo chunk em que Excalidraw já foi carregado —
+				// usar `@excalidraw/excalidraw` aqui criaria uma 2ª instância
+				// e quebra o loader de locale (Loading scene infinito).
+				const { reconcileElements } = await import("./_excalidraw");
 				const localElements = api.getSceneElementsIncludingDeleted();
 				const localAppState = api.getAppState();
 				const reconciled = reconcileElements(
