@@ -83,6 +83,31 @@ function colorFor(userId: string): { background: string; stroke: string } {
 }
 
 const SITE_THEME_KEY = "site-theme";
+// Chave de localStorage para persistir a biblioteca do Excalidraw entre
+// sessões. Compartilhada entre todos os desenhos do mesmo usuário (a UX do
+// Excalidraw assume biblioteca única por instalação, não por documento).
+const LIBRARY_STORAGE_KEY = "excalidraw-library";
+
+function loadStoredLibraryItems(): unknown[] {
+	if (typeof window === "undefined") return [];
+	try {
+		const raw = window.localStorage.getItem(LIBRARY_STORAGE_KEY);
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
+}
+
+function storeLibraryItems(items: readonly unknown[]): void {
+	if (typeof window === "undefined") return;
+	try {
+		window.localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(items));
+	} catch {
+		/* quota / privado: ignorar */
+	}
+}
 
 /**
  * Aplica o tema (light/dark) ao site inteiro togglando a classe `dark` no
@@ -154,7 +179,14 @@ export function DrawingPageClient({
 			// Removemos para o Excalidraw recriar internamente.
 			delete appState.collaborators;
 		}
-		return { ...raw, ...(appState ? { appState } : {}) };
+		// Hidrata a biblioteca persistida no navegador. Excalidraw aceita
+		// `libraryItems` em initialData e cuida do resto.
+		const libraryItems = loadStoredLibraryItems();
+		return {
+			...raw,
+			...(appState ? { appState } : {}),
+			libraryItems,
+		};
 	})();
 
 	const onChange = useCallback(
@@ -489,6 +521,18 @@ export function DrawingPageClient({
 					viewModeEnabled={!canEdit}
 					onChange={onChange}
 					onPointerUpdate={onPointerUpdate as never}
+					// Persiste itens da biblioteca em localStorage — sem isso o
+					// usuário perde tudo ao recarregar.
+					onLibraryChange={(items: readonly unknown[]) => storeLibraryItems(items)}
+					// URL para onde libraries.excalidraw.com redireciona após
+					// clicar em "Add to Excalidraw". O Excalidraw lê os query
+					// params `addLibrary`/`token` automaticamente quando esta prop
+					// está setada e abre o prompt de instalação.
+					libraryReturnUrl={
+						typeof window !== "undefined"
+							? `${window.location.origin}${window.location.pathname}`
+							: undefined
+					}
 					excalidrawAPI={(api: unknown) => {
 						excalidrawAPIRef.current = api as ExcalidrawAPI;
 					}}
