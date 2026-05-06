@@ -49,6 +49,7 @@ type ExcalidrawAPI = {
 		collaborators?: Map<string, unknown>;
 	}) => void;
 	getSceneElementsIncludingDeleted: () => readonly unknown[];
+	getAppState: () => unknown;
 };
 
 type PointerPayload = {
@@ -298,12 +299,29 @@ export function DrawingPageClient({
 		};
 
 		socket.on("connect", join);
-		socket.on("scene-update", (payload: { elements: readonly unknown[] }) => {
+		socket.on("scene-update", async (payload: { elements: readonly unknown[] }) => {
 			const api = excalidrawAPIRef.current;
 			if (!api || !payload?.elements) return;
-			// Marca para o próximo onChange disparado pelo updateScene não retransmitir.
-			skipNextEmitRef.current = true;
-			api.updateScene({ elements: payload.elements });
+
+			// Mescla elementos remotos com locais usando reconcileElements do
+			// próprio Excalidraw — ele resolve conflitos por (version, versionNonce)
+			// elemento a elemento, mantendo o que cada peer está editando agora.
+			try {
+				const { reconcileElements } = await import("@excalidraw/excalidraw");
+				const localElements = api.getSceneElementsIncludingDeleted();
+				const localAppState = api.getAppState();
+				const reconciled = reconcileElements(
+					localElements as never,
+					payload.elements as never,
+					localAppState as never,
+				);
+				skipNextEmitRef.current = true;
+				api.updateScene({ elements: reconciled });
+			} catch (err) {
+				console.warn("[realtime] reconcile falhou, aplicando snapshot puro:", err);
+				skipNextEmitRef.current = true;
+				api.updateScene({ elements: payload.elements });
+			}
 		});
 
 		socket.on("pointer-update", (payload: PointerPayload) => {
