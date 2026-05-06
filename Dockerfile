@@ -5,7 +5,7 @@ FROM node:20-alpine AS deps
 WORKDIR /app
 RUN apk add --no-cache libc6-compat
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 
 # ---------- builder ----------
 FROM node:20-alpine AS builder
@@ -13,6 +13,7 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
 # NEXT_PUBLIC_* precisa estar disponível em build time para ser inlined no bundle.
+# Em Dokploy, defina BuildArgs (ou use --build-arg) com a URL pública do backend.
 ARG NEXT_PUBLIC_BACKEND_URL=http://localhost:8080/api
 ENV NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL}
 

@@ -4,9 +4,13 @@ node_modules
 .next
 out
 coverage
+*.log
 .env
 .env.*
 !.env.example
 docker-compose.yml
 Dockerfile
+Dockerfile.*
 README.md
+.vscode
+.idea
