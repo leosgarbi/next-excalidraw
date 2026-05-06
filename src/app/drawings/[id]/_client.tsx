@@ -18,6 +18,11 @@ const Excalidraw = dynamic(() => import("@excalidraw/excalidraw").then((m) => m.
 	loading: () => <div className="p-8 text-sm text-muted-foreground">Carregando…</div>,
 });
 
+// MainMenu customizado (sem X/GitHub, Discord apontando para nosso server).
+// Em arquivo separado para que o dynamic import com ssr:false funcione com
+// os subcomponentes de namespace (MainMenu.DefaultItems.*).
+const CustomMainMenu = dynamic(() => import("./_main-menu"), { ssr: false });
+
 type Role = "OWNER" | "EDITOR" | "VIEWER";
 
 type Drawing = {
