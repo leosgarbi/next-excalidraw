@@ -31,11 +31,7 @@ export type PointerUpdatePayload = {
 	selectedElementIds?: Record<string, true>;
 };
 
-export interface RealtimeSocket extends Socket {
-	emit(ev: "join", body: { drawingId: string }, ack: (res: unknown) => void): boolean;
-	emit(ev: "scene-update", body: { elements: readonly unknown[] }): boolean;
-	emit(ev: "pointer-update", body: PointerUpdatePayload): boolean;
-}
+export type RealtimeSocket = Socket;
 
 /**
  * Cria uma conexão Socket.IO autenticada via cookie (`withCredentials`).
@@ -47,6 +43,6 @@ export function createRealtimeSocket(): RealtimeSocket {
 		withCredentials: true,
 		transports: ["websocket", "polling"],
 		autoConnect: true,
-	}) as RealtimeSocket;
+	});
 	return socket;
 }
